@@ -2,6 +2,16 @@
 import streamlit as st
 from sqlmodel import Session, select
 from db import init_db, engine
+from db import test_connection  # ADICIONE ISSO
+with st.sidebar:
+    st.header("Menu")
+    menu = st.radio("Selecione uma opção:", ["Início", "Lançamentos", "DRE (Competência)"])
+    if st.button("Testar conexão"):
+        ok, msg = test_connection()
+        st.write(msg)
+    if st.button("Inicializar Banco de Dados"):
+        init_db()
+        st.success("Banco inicializado no Postgres (nuvem).")
 from models import Empresa, Lancamento
 import pandas as pd
 
@@ -92,3 +102,4 @@ elif menu == "DRE (Competência)":
                     st.dataframe(dre, use_container_width=True)
                 with col2:
                     st.metric("Total Lançado", f"R$ {df['valor'].sum():,.2f}")
+

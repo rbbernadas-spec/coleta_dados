@@ -1,0 +1,7 @@
+streamlit
+sqlmodel
+sqlalchemy
+psycopg[binary]
+python-dotenv
+pandas
+plotly

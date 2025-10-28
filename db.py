@@ -1,6 +1,7 @@
 # db.py
 import os
-from urllib.parse import urlparse
+import socket
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from sqlmodel import SQLModel, create_engine, Session
 from dotenv import load_dotenv
 
@@ -30,33 +31,62 @@ def _get_database_url_and_source():
     if not url or "postgresql" not in url:
         raise RuntimeError(
             "DATABASE_URL ausente/ inválida. Configure em Secrets (Streamlit Cloud) "
-            "ex.: postgresql+psycopg://usuario:senha@host:6543/postgres?sslmode=require"
+            "ex.: postgresql+psycopg://usuario:senha@<pooler-host>:6543/postgres?sslmode=require"
         )
-    # Garante ssl
-    if "sslmode=" not in url:
-        url += ("&" if "?" in url else "?") + "sslmode=require"
-    return url, src
+
+    # Garante sslmode=require
+    parsed = urlparse(url)
+    q = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    if "sslmode" not in q:
+        q["sslmode"] = "require"
+
+    # Força IPv4: resolve A record e injeta hostaddr=<IPv4>
+    # Mantemos 'host' original para SNI/certificado TLS.
+    try:
+        # Apenas se ainda não há hostaddr
+        if "hostaddr" not in q and parsed.hostname:
+            # AF_INET = IPv4 only
+            infos = socket.getaddrinfo(parsed.hostname, None, socket.AF_INET, 0, socket.IPPROTO_TCP)
+            if infos:
+                ipv4 = infos[0][4][0]
+                q["hostaddr"] = ipv4
+    except Exception:
+        # Se der erro na resolução IPv4, seguimos sem hostaddr (fica como está)
+        pass
+
+    new_query = urlencode(q)
+    parsed = parsed._replace(query=new_query)
+    final_url = urlunparse(parsed)
+    return final_url, src
 
 DATABASE_URL, DB_SRC = _get_database_url_and_source()
 engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 
 def conn_info():
-    """Retorna (host, porta, origem_da_url) para debug na UI."""
+    """Retorna (host, porta, origem_da_url, query) para debug na UI (sem vazar senha)."""
     p = urlparse(DATABASE_URL)
     host = p.hostname or ""
     port = p.port or "(sem porta)"
-    return host, port, DB_SRC
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    # mostramos se há hostaddr e sslmode
+    extras = []
+    if "hostaddr" in q:
+        extras.append(f"hostaddr={q['hostaddr']}")
+    if "sslmode" in q:
+        extras.append(f"sslmode={q['sslmode']}")
+    extras_str = " & ".join(extras) if extras else "-"
+    return host, port, DB_SRC, extras_str
 
 def test_connection():
     try:
         with engine.connect() as conn:
-            conn.exec_driver_sql("select 1")
+            conn.exec_driver_sql("select 1;")
         return True, "Conexão OK."
     except Exception as e:
         return False, f"Falha na conexão: {e}"
 
 def init_db():
-    import models
+    import models  # registra tabelas
     SQLModel.metadata.create_all(engine)
 
 def get_session():

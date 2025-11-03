@@ -1,6 +1,7 @@
 # app.py
 import streamlit as st
 from sqlmodel import Session, select, delete
+from sqlalchemy.exc import ProgrammingError
 from db import init_db, engine, test_connection, conn_info
 from models import (
     Empresa, Cliente, Fornecedor, Produto, PlanoContasDRE, Estoque,
@@ -12,6 +13,16 @@ from datetime import date, timedelta
 from typing import List, Tuple
 
 st.set_page_config(page_title="Sistema de Coleta de Dados", layout="wide")
+
+# ---------------- Schema bootstrap (auto) ----------------
+# Garante que as tabelas existam após mudanças de modelos
+if "schema_ready" not in st.session_state:
+    try:
+        init_db()
+        st.session_state["schema_ready"] = True
+    except Exception:
+        # Se falhar aqui, o botão "Inicializar Banco" ainda permitirá criar
+        st.session_state["schema_ready"] = False
 
 # ---------------- Helpers ----------------
 def to_dict(m):
@@ -113,15 +124,16 @@ def gerar_cr_cp_e_lancamentos(
 def apagar_dependentes_do_documento(session: Session, doc_id: int):
     """
     Deleta: Itens, Parcelas, CR/CP (pelo prefixo DOC#<id>), Lançamentos (doc_ref=<id>).
+    Usa LIKE em vez de startswith (melhor compatibilidade SQL).
     """
     # 1) Itens
     session.exec(delete(DocumentoItem).where(DocumentoItem.documento_id == doc_id))
     # 2) Parcelas
     session.exec(delete(Parcela).where(Parcela.documento_id == doc_id))
     # 3) CR/CP pelo título prefixado
-    titulo_prefix = f"DOC#{doc_id}"
-    session.exec(delete(ContaReceber).where(ContaReceber.titulo.startswith(titulo_prefix)))
-    session.exec(delete(ContaPagar).where(ContaPagar.titulo.startswith(titulo_prefix)))
+    titulo_like = f"DOC#{doc_id}%"
+    session.exec(delete(ContaReceber).where(ContaReceber.titulo.like(titulo_like)))
+    session.exec(delete(ContaPagar).where(ContaPagar.titulo.like(titulo_like)))
     # 4) Lançamentos pela referência doc_ref
     session.exec(delete(Lancamento).where(Lancamento.doc_ref == str(doc_id)))
     session.commit()
@@ -142,6 +154,7 @@ with st.sidebar:
         if st.button("Inicializar Banco de Dados"):
             try:
                 init_db()
+                st.session_state["schema_ready"] = True
                 st.success("Banco inicializado no Postgres (nuvem).")
             except Exception as e:
                 st.error(f"Falha ao inicializar: {e}")
@@ -160,7 +173,13 @@ elif menu == "Documentos":
 
     with Session(engine) as session:
         # Empresa única (MVP)
-        empresas = session.exec(select(Empresa)).all()
+        try:
+            empresas = session.exec(select(Empresa)).all()
+        except ProgrammingError:
+            # Se a tabela não existir (schema mudou), cria e recarrega
+            init_db()
+            st.experimental_rerun()
+
         if not empresas:
             st.warning("Cadastre uma empresa para começar.")
             col1, col2 = st.columns([2, 1])
@@ -218,7 +237,7 @@ elif menu == "Documentos":
 
             # Parceiro
             st.subheader("Parceiro")
-            parceiro_id = None  # <<<<<< evita NameError
+            parceiro_id = None  # evita NameError
             if natureza in ("VENDA", "SERVICO"):
                 parceiro_tipo = "CLIENTE"
                 lista = session.exec(select(Cliente).where(Cliente.empresa_id == empresa.id)).all()
@@ -226,7 +245,6 @@ elif menu == "Documentos":
                 nomes_combo = ["[+] Cadastrar novo cliente"] + nomes
                 default_idx = 0
                 if editing_doc and editing_doc.parceiro_tipo == "CLIENTE":
-                    # tenta posicionar o parceiro atual
                     try:
                         default_idx = 1 + next(i for i,x in enumerate(nomes) if x.startswith(f"{editing_doc.parceiro_id} - "))
                     except StopIteration:
@@ -289,7 +307,7 @@ elif menu == "Documentos":
             with colp1:
                 cond_default = "0"
                 if editing_doc:
-                    # tenta inferir condição pela diferença média das parcelas
+                    # inferir offsets das parcelas existentes
                     offs = []
                     for p in session.exec(select(Parcela).where(Parcela.documento_id == editing_doc.id)).all():
                         offs.append((p.data_vencto - editing_doc.data_emissao).days)
@@ -346,7 +364,7 @@ elif menu == "Documentos":
                 classif_dre_compra = st.selectbox(
                     "Classificar COMPRA no DRE como:",
                     ["DESPESA", "CUSTO"],
-                    index=(["DESPESA","CUSTO"].index(classif_dre_compra) if editing_doc else 0)
+                    index=(["DESPESA","CUSTO"].index("DESPESA") if not editing_doc else ["DESPESA","CUSTO"].index("DESPESA"))
                 )
 
             observacoes = st.text_area("Observações (opcional)", value=(editing_doc.observacoes or "") if editing_doc else "")
@@ -455,9 +473,14 @@ elif menu == "Documentos":
 
             # Lista e ações
             st.subheader("📚 Documentos Recentes")
-            docs = session.exec(
-                select(Documento).where(Documento.empresa_id == empresa.id).order_by(Documento.id.desc())
-            ).all()
+            try:
+                docs = session.exec(
+                    select(Documento).where(Documento.empresa_id == empresa.id).order_by(Documento.id.desc())
+                ).all()
+            except ProgrammingError:
+                init_db()
+                st.experimental_rerun()
+
             if docs:
                 df_docs = pd.DataFrame([to_dict(d) for d in docs])
                 st.dataframe(df_docs, use_container_width=True)
@@ -473,7 +496,6 @@ elif menu == "Documentos":
                         st.experimental_rerun()
                 with col_b:
                     if st.button("🗑️ Excluir selecionado"):
-                        # Apaga dependentes e o documento
                         apagar_dependentes_do_documento(session, int(escolha_id))
                         session.exec(delete(Documento).where(Documento.id == int(escolha_id)))
                         session.commit()
@@ -521,5 +543,7 @@ elif menu == "DRE (Competência)":
                     st.dataframe(dre, use_container_width=True)
                 with col2:
                     st.metric("Total Lançado", f"R$ {df['valor'].sum():,.2f}")
+
+
 
 

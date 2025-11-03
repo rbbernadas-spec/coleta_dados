@@ -178,7 +178,7 @@ elif menu == "Documentos":
         except ProgrammingError:
             # Se a tabela não existir (schema mudou), cria e recarrega
             init_db()
-            st.experimental_rerun()
+            st.rerun()
 
         if not empresas:
             st.warning("Cadastre uma empresa para começar.")
@@ -210,7 +210,7 @@ elif menu == "Documentos":
             with colm2:
                 if st.session_state["editing_doc_id"] and st.button("Cancelar edição"):
                     st.session_state["editing_doc_id"] = None
-                    st.experimental_rerun()
+                    st.rerun()
 
             # Se estiver editando, carregar doc
             editing_doc = None
@@ -469,7 +469,7 @@ elif menu == "Documentos":
                     st.session_state["editing_doc_id"] = None
                 else:
                     st.success(f"Documento #{doc.id} salvo, parcelas geradas e DRE lançada!")
-                st.experimental_rerun()
+                st.rerun()
 
             # Lista e ações
             st.subheader("📚 Documentos Recentes")
@@ -479,7 +479,7 @@ elif menu == "Documentos":
                 ).all()
             except ProgrammingError:
                 init_db()
-                st.experimental_rerun()
+                st.rerun()
 
             if docs:
                 df_docs = pd.DataFrame([to_dict(d) for d in docs])
@@ -493,14 +493,14 @@ elif menu == "Documentos":
                 with col_a:
                     if st.button("✏️ Editar selecionado"):
                         st.session_state["editing_doc_id"] = int(escolha_id)
-                        st.experimental_rerun()
+                        st.rerun()
                 with col_b:
                     if st.button("🗑️ Excluir selecionado"):
                         apagar_dependentes_do_documento(session, int(escolha_id))
                         session.exec(delete(Documento).where(Documento.id == int(escolha_id)))
                         session.commit()
                         st.success(f"Documento #{int(escolha_id)} excluído.")
-                        st.experimental_rerun()
+                        st.rerun()
             else:
                 st.caption("Nenhum documento ainda.")
 
@@ -543,7 +543,6 @@ elif menu == "DRE (Competência)":
                     st.dataframe(dre, use_container_width=True)
                 with col2:
                     st.metric("Total Lançado", f"R$ {df['valor'].sum():,.2f}")
-
 
 
 

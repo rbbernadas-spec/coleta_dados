@@ -10,18 +10,16 @@ from models import (
 )
 import pandas as pd
 from datetime import date, timedelta
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 st.set_page_config(page_title="Sistema de Coleta de Dados", layout="wide")
 
 # ---------------- Schema bootstrap (auto) ----------------
-# Garante que as tabelas existam após mudanças de modelos
 if "schema_ready" not in st.session_state:
     try:
         init_db()
         st.session_state["schema_ready"] = True
     except Exception:
-        # Se falhar aqui, o botão "Inicializar Banco" ainda permitirá criar
         st.session_state["schema_ready"] = False
 
 # ---------------- Helpers ----------------
@@ -56,16 +54,21 @@ def gerar_cr_cp_e_lancamentos(
     session: Session,
     doc: Documento,
     parcelas: List[Parcela],
-    classif_dre_compra: str = "DESPESA"  # para COMPRA: DESPESA ou CUSTO
+    classif_dre_compra: str = "DESPESA",  # para COMPRA: DESPESA ou CUSTO
+    servico_modo: Optional[str] = None,   # quando doc.natureza == "SERVICO": "VENDA" ou "COMPRA"
 ):
     """
-    - VENDA/SERVICO: cria CR a partir das parcelas + Lancamento(RECEITA)
-    - COMPRA: cria CP a partir das parcelas + Lancamento(DESPESA/CUSTO)
-    Todos com referência ao Documento (titulo 'DOC#<id> ...', doc_ref=<id>).
+    - VENDA: cria CR + Lançamento(RECEITA)
+    - COMPRA: cria CP + Lançamento(DESPESA/CUSTO)
+    - SERVICO: segue servico_modo ("VENDA" ou "COMPRA")
     """
+    natureza_eff = doc.natureza
+    if doc.natureza == "SERVICO":
+        natureza_eff = servico_modo or "VENDA"
+
     titulo_base = f"DOC#{doc.id} {doc.tipo_doc} {doc.numero or ''}".strip()
 
-    if doc.natureza in ("VENDA", "SERVICO"):
+    if natureza_eff == "VENDA":
         # CR + RECEITA
         for p in parcelas:
             cr = ContaReceber(
@@ -93,7 +96,7 @@ def gerar_cr_cp_e_lancamentos(
         )
         session.add(lan)
 
-    elif doc.natureza == "COMPRA":
+    elif natureza_eff == "COMPRA":
         # CP + DESPESA/CUSTO
         for p in parcelas:
             cp = ContaPagar(
@@ -122,28 +125,90 @@ def gerar_cr_cp_e_lancamentos(
         session.add(lan)
 
 def apagar_dependentes_do_documento(session: Session, doc_id: int):
-    """
-    Deleta: Itens, Parcelas, CR/CP (pelo prefixo DOC#<id>), Lançamentos (doc_ref=<id>).
-    Usa LIKE em vez de startswith (melhor compatibilidade SQL).
-    """
-    # 1) Itens
+    """Deleta: Itens, Parcelas, CR/CP (titulo DOC#<id>%), Lançamentos (doc_ref=<id>)."""
     session.exec(delete(DocumentoItem).where(DocumentoItem.documento_id == doc_id))
-    # 2) Parcelas
     session.exec(delete(Parcela).where(Parcela.documento_id == doc_id))
-    # 3) CR/CP pelo título prefixado
     titulo_like = f"DOC#{doc_id}%"
     session.exec(delete(ContaReceber).where(ContaReceber.titulo.like(titulo_like)))
     session.exec(delete(ContaPagar).where(ContaPagar.titulo.like(titulo_like)))
-    # 4) Lançamentos pela referência doc_ref
     session.exec(delete(Lancamento).where(Lancamento.doc_ref == str(doc_id)))
     session.commit()
+
+def pick_parceiro(session: Session, empresa_id: int, natureza_eff: str, editing_doc: Optional[Documento]) -> Tuple[str, Optional[int]]:
+    """
+    Exibe seletor de CLIENTE (VENDA) ou FORNECEDOR (COMPRA),
+    com opção de cadastrar no ato. Retorna (parceiro_tipo, parceiro_id).
+    """
+    st.subheader("Parceiro")
+    parceiro_id = None
+
+    if natureza_eff == "VENDA":
+        parceiro_tipo = "CLIENTE"
+        lista = session.exec(select(Cliente).where(Cliente.empresa_id == empresa_id)).all()
+        nomes = [f"{c.id} - {c.nome}" for c in lista]
+        nomes_combo = ["[+] Cadastrar novo cliente"] + nomes
+        default_idx = 0
+        if editing_doc and editing_doc.parceiro_tipo == "CLIENTE":
+            try:
+                default_idx = 1 + next(i for i, x in enumerate(nomes) if x.startswith(f"{editing_doc.parceiro_id} - "))
+            except StopIteration:
+                default_idx = 0
+        escolha = st.selectbox("Cliente", nomes_combo, index=default_idx, key="sb_cliente")
+        if escolha == "[+] Cadastrar novo cliente":
+            with st.expander("Cadastrar Cliente", expanded=True):
+                novo_nome = st.text_input("Nome do novo cliente", key="novo_cli_nome")
+                novo_doc = st.text_input("Documento (opcional)", key="novo_cli_doc")
+                if st.button("Salvar Cliente", key="btn_salvar_cli"):
+                    if not novo_nome.strip():
+                        st.error("Informe o nome.")
+                    else:
+                        c = Cliente(empresa_id=empresa_id, nome=novo_nome.strip(), doc=(novo_doc.strip() or None))
+                        session.add(c)
+                        session.commit()
+                        st.success("Cliente cadastrado. Recarregue a página para selecioná-lo.")
+                        st.rerun()
+        else:
+            parceiro_id = int(escolha.split(" - ")[0])
+
+    else:  # natureza_eff == "COMPRA"
+        parceiro_tipo = "FORNECEDOR"
+        lista = session.exec(select(Fornecedor).where(Fornecedor.empresa_id == empresa_id)).all()
+        nomes = [f"{f.id} - {f.nome}" for f in lista]
+        nomes_combo = ["[+] Cadastrar novo fornecedor"] + nomes
+        default_idx = 0
+        if editing_doc and editing_doc.parceiro_tipo == "FORNECEDOR":
+            try:
+                default_idx = 1 + next(i for i, x in enumerate(nomes) if x.startswith(f"{editing_doc.parceiro_id} - "))
+            except StopIteration:
+                default_idx = 0
+        escolha = st.selectbox("Fornecedor", nomes_combo, index=default_idx, key="sb_fornecedor")
+        if escolha == "[+] Cadastrar novo fornecedor":
+            with st.expander("Cadastrar Fornecedor", expanded=True):
+                novo_nome = st.text_input("Nome do novo fornecedor", key="novo_forn_nome")
+                novo_doc = st.text_input("Documento (opcional)", key="novo_forn_doc")
+                if st.button("Salvar Fornecedor", key="btn_salvar_forn"):
+                    if not novo_nome.strip():
+                        st.error("Informe o nome.")
+                    else:
+                        f = Fornecedor(empresa_id=empresa_id, nome=novo_nome.strip(), doc=(novo_doc.strip() or None))
+                        session.add(f)
+                        session.commit()
+                        st.success("Fornecedor cadastrado. Recarregue a página para selecioná-lo.")
+                        st.rerun()
+        else:
+            parceiro_id = int(escolha.split(" - ")[0])
+
+    return parceiro_tipo, parceiro_id
 
 # ---------------- Sidebar ----------------
 with st.sidebar:
     st.header("Menu")
     host, port, src, extras = conn_info()
     st.caption(f"📡 Conectando a: `{host}:{port}` • fonte: **{src}** • {extras or '-'}")
-    menu = st.radio("Selecione uma opção:", ["Início", "Documentos", "Lançamentos (consulta)", "DRE (Competência)"])
+    menu = st.radio(
+        "Selecione uma opção:",
+        ["Início", "Documentos", "Contas a Receber", "Contas a Pagar", "Lançamentos (consulta)", "DRE (Competência)"]
+    )
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -163,10 +228,10 @@ with st.sidebar:
 if menu == "Início":
     st.title("📊 Sistema de Coleta de Dados - Consultoria (Nuvem)")
     st.write(
-        "Agora seus lançamentos passam a ser via **Documentos** (cabeçalho/parcelas/itens). "
+        "Cadastre **Documentos** (cabeçalho/parcelas/itens). "
         "O sistema gera automaticamente **Contas a Receber/Pagar** e **Lançamentos (DRE)**."
     )
-    st.info("Sugestão: cadastre ao menos um **Cliente** e/ou **Fornecedor** antes de lançar um Documento.")
+    st.info("Dica: crie ao menos um **Cliente** e/ou **Fornecedor** antes de lançar um Documento.")
 
 elif menu == "Documentos":
     st.header("📄 Documentos (Completo: cabeçalho + parcelas + itens)")
@@ -176,7 +241,6 @@ elif menu == "Documentos":
         try:
             empresas = session.exec(select(Empresa)).all()
         except ProgrammingError:
-            # Se a tabela não existir (schema mudou), cria e recarrega
             init_db()
             st.rerun()
 
@@ -212,22 +276,21 @@ elif menu == "Documentos":
                     st.session_state["editing_doc_id"] = None
                     st.rerun()
 
-            # Se estiver editando, carregar doc
-            editing_doc = None
-            if st.session_state["editing_doc_id"]:
-                editing_doc = session.get(Documento, st.session_state["editing_doc_id"])
+            editing_doc = session.get(Documento, st.session_state["editing_doc_id"]) if st.session_state["editing_doc_id"] else None
 
-            # --- Cabeçalho do Documento ---
+            # Cabeçalho
             st.subheader("Cabeçalho")
             col1, col2, col3 = st.columns([1, 1, 1])
             with col1:
                 natureza = st.selectbox(
                     "Natureza", ["VENDA", "COMPRA", "SERVICO"],
-                    index=(["VENDA","COMPRA","SERVICO"].index(editing_doc.natureza) if editing_doc else 0)
+                    index=(["VENDA","COMPRA","SERVICO"].index(editing_doc.natureza) if editing_doc else 0),
+                    key="sb_natureza"
                 )
                 tipo_doc = st.selectbox(
                     "Tipo de Documento", ["NFe", "NFSe", "Recibo", "Contrato", "Outro"],
-                    index=(["NFe","NFSe","Recibo","Contrato","Outro"].index(editing_doc.tipo_doc) if editing_doc else 0)
+                    index=(["NFe","NFSe","Recibo","Contrato","Outro"].index(editing_doc.tipo_doc) if editing_doc else 0),
+                    key="sb_tipodoc"
                 )
             with col2:
                 numero = st.text_input("Número", value=(editing_doc.numero or "") if editing_doc else "")
@@ -235,61 +298,20 @@ elif menu == "Documentos":
             with col3:
                 chave = st.text_input("Chave (opcional)", value=(editing_doc.chave or "") if editing_doc else "")
 
-            # Parceiro
-            st.subheader("Parceiro")
-            parceiro_id = None  # evita NameError
-            if natureza in ("VENDA", "SERVICO"):
-                parceiro_tipo = "CLIENTE"
-                lista = session.exec(select(Cliente).where(Cliente.empresa_id == empresa.id)).all()
-                nomes = [f"{c.id} - {c.nome}" for c in lista]
-                nomes_combo = ["[+] Cadastrar novo cliente"] + nomes
-                default_idx = 0
-                if editing_doc and editing_doc.parceiro_tipo == "CLIENTE":
-                    try:
-                        default_idx = 1 + next(i for i,x in enumerate(nomes) if x.startswith(f"{editing_doc.parceiro_id} - "))
-                    except StopIteration:
-                        default_idx = 0
-                escolha = st.selectbox("Cliente", nomes_combo, index=default_idx)
-                if escolha == "[+] Cadastrar novo cliente":
-                    novo_nome = st.text_input("Nome do novo cliente")
-                    novo_doc = st.text_input("Documento (opcional)")
-                    if st.button("Salvar Cliente"):
-                        if not novo_nome.strip():
-                            st.error("Informe o nome.")
-                        else:
-                            c = Cliente(empresa_id=empresa.id, nome=novo_nome.strip(), doc=(novo_doc.strip() or None))
-                            session.add(c)
-                            session.commit()
-                            st.success("Cliente cadastrado. Recarregue a página para selecioná-lo.")
-                            st.stop()
-                else:
-                    parceiro_id = int(escolha.split(" - ")[0])
-            else:
-                parceiro_tipo = "FORNECEDOR"
-                lista = session.exec(select(Fornecedor).where(Fornecedor.empresa_id == empresa.id)).all()
-                nomes = [f"{f.id} - {f.nome}" for f in lista]
-                nomes_combo = ["[+] Cadastrar novo fornecedor"] + nomes
-                default_idx = 0
-                if editing_doc and editing_doc.parceiro_tipo == "FORNECEDOR":
-                    try:
-                        default_idx = 1 + next(i for i,x in enumerate(nomes) if x.startswith(f"{editing_doc.parceiro_id} - "))
-                    except StopIteration:
-                        default_idx = 0
-                escolha = st.selectbox("Fornecedor", nomes_combo, index=default_idx)
-                if escolha == "[+] Cadastrar novo fornecedor":
-                    novo_nome = st.text_input("Nome do novo fornecedor")
-                    novo_doc = st.text_input("Documento (opcional)")
-                    if st.button("Salvar Fornecedor"):
-                        if not novo_nome.strip():
-                            st.error("Informe o nome.")
-                        else:
-                            f = Fornecedor(empresa_id=empresa.id, nome=novo_nome.strip(), doc=(novo_doc.strip() or None))
-                            session.add(f)
-                            session.commit()
-                            st.success("Fornecedor cadastrado. Recarregue a página para selecioná-lo.")
-                            st.stop()
-                else:
-                    parceiro_id = int(escolha.split(" - ")[0])
+            # Para SERVIÇO: escolher se é VENDA (vou receber) ou COMPRA (vou pagar)
+            servico_modo = None
+            if natureza == "SERVICO":
+                servico_modo = st.radio(
+                    "Este serviço é:", ["VENDA (vou receber)", "COMPRA (vou pagar)"],
+                    horizontal=True
+                )
+                servico_modo = "VENDA" if servico_modo.startswith("VENDA") else "COMPRA"
+
+            # Determina a natureza efetiva para parceiro/fluxo financeiro
+            natureza_eff = natureza if natureza != "SERVICO" else (servico_modo or "VENDA")
+
+            # Parceiro conforme natureza efetiva
+            parceiro_tipo, parceiro_id = pick_parceiro(session, empresa.id, natureza_eff, editing_doc)
 
             # Datas e valor
             st.subheader("Datas e Valor")
@@ -301,13 +323,12 @@ elif menu == "Documentos":
             with col3:
                 valor_total = st.number_input("Valor Total (R$)", min_value=0.0, step=0.01, format="%.2f", value=float(editing_doc.valor_total) if editing_doc else 0.0)
 
-            # Pagamento / Parcelas
+            # Parcelas
             st.subheader("Pagamento / Parcelas")
             colp1, colp2 = st.columns([1, 2])
             with colp1:
                 cond_default = "0"
                 if editing_doc:
-                    # inferir offsets das parcelas existentes
                     offs = []
                     for p in session.exec(select(Parcela).where(Parcela.documento_id == editing_doc.id)).all():
                         offs.append((p.data_vencto - editing_doc.data_emissao).days)
@@ -325,18 +346,12 @@ elif menu == "Documentos":
             st.subheader("Itens (opcional)")
             st.caption("Preencha itens para detalhar produtos/serviços. Deixe vazio se não precisar.")
             if "itens_df" not in st.session_state or st.session_state.get("editing_doc_snapshot") != st.session_state.get("editing_doc_id"):
-                # carrega itens do doc em edição ou inicia vazio
                 if editing_doc:
                     itens = session.exec(select(DocumentoItem).where(DocumentoItem.documento_id == editing_doc.id)).all()
                     if itens:
                         st.session_state["itens_df"] = pd.DataFrame([
-                            {
-                                "descricao": it.descricao,
-                                "quantidade": it.quantidade,
-                                "unidade": it.unidade,
-                                "preco_unit": it.preco_unit,
-                                "valor_total": it.valor_total,
-                            }
+                            {"descricao": it.descricao, "quantidade": it.quantidade, "unidade": it.unidade,
+                             "preco_unit": it.preco_unit, "valor_total": it.valor_total}
                             for it in itens
                         ])
                     else:
@@ -358,14 +373,10 @@ elif menu == "Documentos":
             if not itens_df.empty:
                 itens_df["valor_total"] = (itens_df["quantidade"].astype(float) * itens_df["preco_unit"].astype(float)).round(2)
 
-            # Classificação DRE (para COMPRA)
+            # Classificação DRE para compras (inclui SERVIÇO=COMPRA)
             classif_dre_compra = "DESPESA"
-            if natureza == "COMPRA":
-                classif_dre_compra = st.selectbox(
-                    "Classificar COMPRA no DRE como:",
-                    ["DESPESA", "CUSTO"],
-                    index=(["DESPESA","CUSTO"].index("DESPESA") if not editing_doc else ["DESPESA","CUSTO"].index("DESPESA"))
-                )
+            if natureza_eff == "COMPRA":
+                classif_dre_compra = st.selectbox("Classificar COMPRA no DRE como:", ["DESPESA", "CUSTO"])
 
             observacoes = st.text_area("Observações (opcional)", value=(editing_doc.observacoes or "") if editing_doc else "")
 
@@ -378,20 +389,22 @@ elif menu == "Documentos":
                     erros.append("Valor Total deve ser > 0.")
                 if not parceiro_id:
                     erros.append("Selecione um parceiro válido (ou cadastre um).")
+                if natureza == "SERVICO" and servico_modo not in ("VENDA","COMPRA"):
+                    erros.append("Defina se o serviço é VENDA (vou receber) ou COMPRA (vou pagar).")
                 if erros:
                     for e in erros:
                         st.error(e)
                     st.stop()
 
                 if editing_doc:
-                    # Atualiza documento e refaz tudo
+                    # Atualiza documento e refaz dependentes
                     doc = editing_doc
-                    doc.natureza = natureza
+                    doc.natureza = natureza  # mantém "SERVICO" na base quando for serviço
                     doc.tipo_doc = tipo_doc
                     doc.numero = numero.strip() or None
                     doc.serie = serie.strip() or None
                     doc.chave = chave.strip() or None
-                    doc.parceiro_tipo = parceiro_tipo
+                    doc.parceiro_tipo = parceiro_tipo  # conforme natureza_eff
                     doc.parceiro_id = parceiro_id
                     doc.data_emissao = data_emissao
                     doc.data_competencia = data_competencia
@@ -400,19 +413,16 @@ elif menu == "Documentos":
                     session.add(doc)
                     session.commit()
 
-                    # Apaga dependentes antigos e recria
                     apagar_dependentes_do_documento(session, doc.id)
-
                 else:
-                    # Cria novo documento
                     doc = Documento(
                         empresa_id=empresa.id,
-                        natureza=natureza,
+                        natureza=natureza,  # guarda "SERVICO" quando for serviço
                         tipo_doc=tipo_doc,
                         numero=numero.strip() or None,
                         serie=serie.strip() or None,
                         chave=chave.strip() or None,
-                        parceiro_tipo=parceiro_tipo,
+                        parceiro_tipo=parceiro_tipo,  # CLIENTE se VENDA; FORNECEDOR se COMPRA
                         parceiro_id=parceiro_id,
                         data_emissao=data_emissao,
                         data_competencia=data_competencia,
@@ -449,7 +459,7 @@ elif menu == "Documentos":
                 # Parcelas
                 parcels = []
                 for i, (venc, val) in enumerate(preview, start=1):
-                    destino = "CR" if natureza in ("VENDA", "SERVICO") else "CP"
+                    destino = "CR" if natureza_eff == "VENDA" else "CP"
                     p = Parcela(
                         documento_id=doc.id,
                         destino=destino,
@@ -460,8 +470,12 @@ elif menu == "Documentos":
                     parcels.append(p)
                 session.commit()
 
-                # CR/CP + Lançamentos
-                gerar_cr_cp_e_lancamentos(session, doc, parcels, classif_dre_compra=classif_dre_compra)
+                # CR/CP + Lançamentos (DRE) — agora passando servico_modo
+                gerar_cr_cp_e_lancamentos(
+                    session, doc, parcels,
+                    classif_dre_compra=classif_dre_compra,
+                    servico_modo=(servico_modo if natureza == "SERVICO" else None)
+                )
                 session.commit()
 
                 if editing_doc:
@@ -504,6 +518,172 @@ elif menu == "Documentos":
             else:
                 st.caption("Nenhum documento ainda.")
 
+elif menu == "Contas a Receber":
+    st.header("💰 Contas a Receber")
+
+    with Session(engine) as session:
+        empresas = session.exec(select(Empresa)).all()
+        if not empresas:
+            st.warning("Cadastre uma empresa em Documentos.")
+        else:
+            empresa = empresas[0]
+
+            # Filtros
+            colf1, colf2, colf3 = st.columns([1.2, 1.2, 1])
+            with colf1:
+                dt_ini = st.date_input("Vencimento de", value=date.today() - timedelta(days=30))
+            with colf2:
+                dt_fim = st.date_input("Vencimento até", value=date.today() + timedelta(days=60))
+            with colf3:
+                status_opts = ["ABERTO", "PARCIAL", "QUITADO"]
+                status_sel = st.multiselect("Status", status_opts, default=["ABERTO", "PARCIAL"])
+
+            clientes = session.exec(select(Cliente).where(Cliente.empresa_id == empresa.id)).all()
+            mapa_cli = {0: "Todos"} | {c.id: c.nome for c in clientes}
+            cli_id = st.selectbox("Cliente", list(mapa_cli.keys()), format_func=lambda x: mapa_cli[x])
+
+            # Query
+            q = select(ContaReceber).where(ContaReceber.empresa_id == empresa.id)
+            q = q.where(ContaReceber.data_vencto >= dt_ini).where(ContaReceber.data_vencto <= dt_fim)
+            if status_sel:
+                q = q.where(ContaReceber.status.in_(status_sel))
+            if cli_id != 0:
+                q = q.where(ContaReceber.cliente_id == cli_id)
+            titulos = session.exec(q.order_by(ContaReceber.data_vencto, ContaReceber.id)).all()
+
+            if titulos:
+                df = pd.DataFrame([to_dict(t) for t in titulos])
+                st.dataframe(df, use_container_width=True)
+                ids = [t.id for t in titulos]
+                sel_id = st.selectbox("Título", ids, format_func=lambda x: f"CR#{x}")
+                t = session.get(ContaReceber, sel_id)
+
+                st.subheader("Ações")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.write("🔻 Baixa (parcial/total)")
+                    val_baixa = st.number_input("Valor da baixa", min_value=0.0, step=0.01, format="%.2f", key="cr_baixa_val")
+                    if st.button("Registrar baixa", key="cr_baixar"):
+                        if val_baixa <= 0:
+                            st.error("Informe um valor > 0.")
+                        elif t.status == "QUITADO":
+                            st.warning("Título já quitado.")
+                        else:
+                            novo_saldo = round(max(0.0, (t.saldo or 0.0) - val_baixa), 2)
+                            t.saldo = novo_saldo
+                            t.status = "QUITADO" if novo_saldo == 0 else "PARCIAL"
+                            session.add(t)
+                            session.commit()
+                            st.success("Baixa registrada.")
+                            st.rerun()
+                with col2:
+                    st.write("✏️ Editar título")
+                    novo_titulo = st.text_input("Título", value=t.titulo, key="cr_edit_tit")
+                    novo_vencto = st.date_input("Vencimento", value=t.data_vencto, key="cr_edit_venc")
+                    novo_valor = st.number_input("Valor", min_value=0.0, value=float(t.valor), step=0.01, format="%.2f", key="cr_edit_val")
+                    if st.button("Salvar edição", key="cr_salvar_edit"):
+                        t.titulo = novo_titulo.strip() or t.titulo
+                        t.data_vencto = novo_vencto
+                        t.valor = novo_valor
+                        if t.saldo > t.valor:
+                            t.saldo = t.valor
+                        session.add(t)
+                        session.commit()
+                        st.success("Título atualizado.")
+                        st.rerun()
+                with col3:
+                    st.write("🗑️ Excluir")
+                    if st.button("Excluir título", key="cr_excluir"):
+                        session.exec(delete(ContaReceber).where(ContaReceber.id == t.id))
+                        session.commit()
+                        st.success("Título excluído.")
+                        st.rerun()
+            else:
+                st.caption("Nenhum título encontrado com os filtros aplicados.")
+
+elif menu == "Contas a Pagar":
+    st.header("📤 Contas a Pagar")
+
+    with Session(engine) as session:
+        empresas = session.exec(select(Empresa)).all()
+        if not empresas:
+            st.warning("Cadastre uma empresa em Documentos.")
+        else:
+            empresa = empresas[0]
+
+            # Filtros
+            colf1, colf2, colf3 = st.columns([1.2, 1.2, 1])
+            with colf1:
+                dt_ini = st.date_input("Vencimento de", value=date.today() - timedelta(days=30), key="cp_di")
+            with colf2:
+                dt_fim = st.date_input("Vencimento até", value=date.today() + timedelta(days=60), key="cp_df")
+            with colf3:
+                status_opts = ["ABERTO", "PARCIAL", "QUITADO"]
+                status_sel = st.multiselect("Status", status_opts, default=["ABERTO", "PARCIAL"], key="cp_st")
+
+            fornecedores = session.exec(select(Fornecedor).where(Fornecedor.empresa_id == empresa.id)).all()
+            mapa_forn = {0: "Todos"} | {f.id: f.nome for f in fornecedores}
+            forn_id = st.selectbox("Fornecedor", list(mapa_forn.keys()), format_func=lambda x: mapa_forn[x], key="cp_forn")
+
+            # Query
+            q = select(ContaPagar).where(ContaPagar.empresa_id == empresa.id)
+            q = q.where(ContaPagar.data_vencto >= dt_ini).where(ContaPagar.data_vencto <= dt_fim)
+            if status_sel:
+                q = q.where(ContaPagar.status.in_(status_sel))
+            if forn_id != 0:
+                q = q.where(ContaPagar.fornecedor_id == forn_id)
+            titulos = session.exec(q.order_by(ContaPagar.data_vencto, ContaPagar.id)).all()
+
+            if titulos:
+                df = pd.DataFrame([to_dict(t) for t in titulos])
+                st.dataframe(df, use_container_width=True)
+                ids = [t.id for t in titulos]
+                sel_id = st.selectbox("Título", ids, format_func=lambda x: f"CP#{x}", key="cp_sel")
+                t = session.get(ContaPagar, sel_id)
+
+                st.subheader("Ações")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.write("🔻 Baixa (parcial/total)")
+                    val_baixa = st.number_input("Valor da baixa", min_value=0.0, step=0.01, format="%.2f", key="cp_baixa_val")
+                    if st.button("Registrar baixa", key="cp_baixar"):
+                        if val_baixa <= 0:
+                            st.error("Informe um valor > 0.")
+                        elif t.status == "QUITADO":
+                            st.warning("Título já quitado.")
+                        else:
+                            novo_saldo = round(max(0.0, (t.saldo or 0.0) - val_baixa), 2)
+                            t.saldo = novo_saldo
+                            t.status = "QUITADO" if novo_saldo == 0 else "PARCIAL"
+                            session.add(t)
+                            session.commit()
+                            st.success("Baixa registrada.")
+                            st.rerun()
+                with col2:
+                    st.write("✏️ Editar título")
+                    novo_titulo = st.text_input("Título", value=t.titulo, key="cp_edit_tit")
+                    novo_vencto = st.date_input("Vencimento", value=t.data_vencto, key="cp_edit_venc")
+                    novo_valor = st.number_input("Valor", min_value=0.0, value=float(t.valor), step=0.01, format="%.2f", key="cp_edit_val")
+                    if st.button("Salvar edição", key="cp_salvar_edit"):
+                        t.titulo = novo_titulo.strip() or t.titulo
+                        t.data_vencto = novo_vencto
+                        t.valor = novo_valor
+                        if t.saldo > t.valor:
+                            t.saldo = t.valor
+                        session.add(t)
+                        session.commit()
+                        st.success("Título atualizado.")
+                        st.rerun()
+                with col3:
+                    st.write("🗑️ Excluir")
+                    if st.button("Excluir título", key="cp_excluir"):
+                        session.exec(delete(ContaPagar).where(ContaPagar.id == t.id))
+                        session.commit()
+                        st.success("Título excluído.")
+                        st.rerun()
+            else:
+                st.caption("Nenhum título encontrado com os filtros aplicados.")
+
 elif menu == "Lançamentos (consulta)":
     st.header("🧾 Lançamentos (somente consulta)")
     with Session(engine) as session:
@@ -537,12 +717,12 @@ elif menu == "DRE (Competência)":
             else:
                 df = pd.DataFrame([to_dict(l) for l in lancs])
                 dre = df.groupby("tipo", dropna=False)["valor"].sum().reset_index()
-
                 col1, col2 = st.columns([2, 1])
                 with col1:
                     st.dataframe(dre, use_container_width=True)
                 with col2:
                     st.metric("Total Lançado", f"R$ {df['valor'].sum():,.2f}")
+
 
 
 

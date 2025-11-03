@@ -3,8 +3,7 @@ from typing import Optional
 from datetime import date
 from sqlmodel import SQLModel, Field
 
-# IMPORTANTE: evita erro "Table ... already defined" nos reruns do Streamlit
-# Limpamos a metadata antes de declarar as classes novamente.
+# Evita erro "Table ... already defined" em reruns do Streamlit
 SQLModel.metadata.clear()
 
 # --- ENTIDADES BÁSICAS ---
@@ -57,7 +56,7 @@ class Estoque(SQLModel, table=True):
     qty_atual: float = 0
     custo_medio_atual: float = 0
 
-# --- LANCAMENTOS / FINANCEIRO ---
+# --- DRE / Lançamentos por competência ---
 
 class Lancamento(SQLModel, table=True):
     __tablename__ = "lancamento"
@@ -73,6 +72,8 @@ class Lancamento(SQLModel, table=True):
     tipo: str  # 'RECEITA', 'DESPESA', 'CUSTO'
     origem: Optional[str] = None
     doc_ref: Optional[str] = None
+
+# --- CR / CP ---
 
 class ContaReceber(SQLModel, table=True):
     __tablename__ = "contasreceber"
@@ -97,3 +98,51 @@ class ContaPagar(SQLModel, table=True):
     valor: float
     saldo: float
     status: str = "ABERTO"
+
+# --- DOCUMENTOS (cabeçalho / parcelas / itens) ---
+
+class Documento(SQLModel, table=True):
+    __tablename__ = "documento"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    empresa_id: int = Field(foreign_key="empresa.id")
+
+    # VENDA | COMPRA | SERVICO
+    natureza: str
+
+    # NFe | NFSe | Recibo | Contrato | Outro
+    tipo_doc: str
+    numero: Optional[str] = None
+    serie: Optional[str] = None
+    chave: Optional[str] = None
+
+    # CLIENTE | FORNECEDOR
+    parceiro_tipo: str
+    parceiro_id: int  # foreign key lógica: cliente.id ou fornecedor.id (conforme parceiro_tipo)
+
+    data_emissao: date
+    data_competencia: date
+    valor_total: float
+    observacoes: Optional[str] = None
+
+class Parcela(SQLModel, table=True):
+    __tablename__ = "parcela"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    documento_id: int = Field(foreign_key="documento.id")
+    # CR (contas a receber) | CP (contas a pagar)
+    destino: str
+    data_vencto: date
+    valor: float
+
+class DocumentoItem(SQLModel, table=True):
+    __tablename__ = "documentoitem"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    documento_id: int = Field(foreign_key="documento.id")
+    produto_id: Optional[int] = Field(default=None, foreign_key="produto.id")
+    descricao: str
+    quantidade: float
+    unidade: str
+    preco_unit: float
+    valor_total: float
+    # opcional: classificar direto a receita/custo/despesa por item
+    conta_dre_id: Optional[int] = Field(default=None, foreign_key="planocontasdre.id")
+

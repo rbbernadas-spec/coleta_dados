@@ -66,16 +66,46 @@ DRE_PRESETS = [
     "PROVISÕES: IRPJ e CSLL",
 ]
 
+# --- SEED_PLANO_CONTAS ---
+from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError, InternalError
+
 def seed_plano_contas_if_needed(session: Session, empresa_id: int):
+    """
+    Garante que a tabela PlanoContasDRE exista com a coluna empresa_id
+    e insere os presets se estiverem faltando.
+    Tolerante a schemas antigos/incompletos.
+    """
+    # 1) Tenta selecionar; se der erro, força (re)criação do metadata.
     try:
         existentes = session.exec(
             select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
         ).all()
-    except ProgrammingError:
-        init_db()
-        existentes = session.exec(
-            select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
-        ).all()
+    except (ProgrammingError, InternalError, Exception):
+        # cria tudo que estiver faltando
+        from sqlmodel import SQLModel
+        SQLModel.metadata.create_all(session.get_bind())
+        session.commit()
+        try:
+            existentes = session.exec(
+                select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
+            ).all()
+        except Exception:
+            # último recurso: cria a tabela “na unha” (id, empresa_id, nome)
+            session.exec(text("""
+                CREATE TABLE IF NOT EXISTS planocontasdre (
+                    id SERIAL PRIMARY KEY,
+                    empresa_id INTEGER NOT NULL,
+                    nome TEXT NOT NULL
+                );
+            """))
+            # cria índice básico (se já existir, ignora)
+            session.exec(text("CREATE INDEX IF NOT EXISTS ix_planocontasdre_empresa_id ON planocontasdre (empresa_id);"))
+            session.commit()
+            existentes = session.exec(
+                select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
+            ).all()
+
     nomes_exist = {c.nome for c in existentes}
     criou = False
     for nome in DRE_PRESETS:
@@ -84,6 +114,7 @@ def seed_plano_contas_if_needed(session: Session, empresa_id: int):
             criou = True
     if criou:
         session.commit()
+
 
 def carregar_mapa_contas(session: Session, empresa_id: int) -> Dict[str, int]:
     contas = session.exec(

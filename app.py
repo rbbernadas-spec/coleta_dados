@@ -66,45 +66,45 @@ DRE_PRESETS = [
     "PROVISÕES: IRPJ e CSLL",
 ]
 
-# --- SEED_PLANO_CONTAS ---
+# app.py — SUBSTITUIR seed_plano_contas_if_needed por esta versão
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError, InternalError
+from sqlmodel import SQLModel
 
 def seed_plano_contas_if_needed(session: Session, empresa_id: int):
     """
-    Garante que a tabela PlanoContasDRE exista com a coluna empresa_id
-    e insere os presets se estiverem faltando.
-    Tolerante a schemas antigos/incompletos.
+    Garante a existência de PlanoContasDRE e insere presets.
+    Compatível com Transaction Pooler: DDL roda em AUTOCOMMIT.
     """
-    # 1) Tenta selecionar; se der erro, força (re)criação do metadata.
     try:
+        # tenta listar contas
         existentes = session.exec(
             select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
         ).all()
     except (ProgrammingError, InternalError, Exception):
-        # cria tudo que estiver faltando
-        from sqlmodel import SQLModel
-        SQLModel.metadata.create_all(session.get_bind())
-        session.commit()
+        # 1) tenta criar via metadata (ainda pode falhar no pooler)
         try:
-            existentes = session.exec(
-                select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
-            ).all()
+            SQLModel.metadata.create_all(session.get_bind())
+            session.commit()
         except Exception:
-            # último recurso: cria a tabela “na unha” (id, empresa_id, nome)
-            session.exec(text("""
+            pass
+
+        # 2) cria com AUTOCOMMIT (compatível com pooler)
+        from db import engine
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.exec_driver_sql("""
                 CREATE TABLE IF NOT EXISTS planocontasdre (
                     id SERIAL PRIMARY KEY,
                     empresa_id INTEGER NOT NULL,
                     nome TEXT NOT NULL
-                );
-            """))
-            # cria índice básico (se já existir, ignora)
-            session.exec(text("CREATE INDEX IF NOT EXISTS ix_planocontasdre_empresa_id ON planocontasdre (empresa_id);"))
-            session.commit()
-            existentes = session.exec(
-                select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
-            ).all()
+                )
+            """)
+            conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_planocontasdre_empresa_id ON planocontasdre (empresa_id)")
+        session.commit()
+
+        existentes = session.exec(
+            select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
+        ).all()
 
     nomes_exist = {c.nome for c in existentes}
     criou = False
@@ -114,6 +114,7 @@ def seed_plano_contas_if_needed(session: Session, empresa_id: int):
             criou = True
     if criou:
         session.commit()
+
 
 
 def carregar_mapa_contas(session: Session, empresa_id: int) -> Dict[str, int]:
@@ -894,6 +895,7 @@ elif menu == "DRE (Competência)":
             col1.metric("Receita Líquida", f"R$ {receita_liquida:,.2f}")
             col2.metric("Lucro Bruto", f"R$ {lucro_bruto:,.2f}")
             col3.metric("Resultado Líquido", f"R$ {resultado_liquido:,.2f}")
+
 
 
 

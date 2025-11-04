@@ -1,8 +1,8 @@
 # models.py
 from __future__ import annotations
 from typing import Optional
-from datetime import date, datetime
-from sqlmodel import SQLModel, Field, Relationship
+from datetime import date
+from sqlmodel import SQLModel, Field
 
 
 # ----------------- Tabelas base -----------------
@@ -11,44 +11,33 @@ class Empresa(SQLModel, table=True):
     nome: str
     cnpj: Optional[str] = None
 
-    # relacionamentos (apenas para referência; não são obrigatórios no app)
-    clientes: list["Cliente"] = Relationship(back_populates="empresa")
-    fornecedores: list["Fornecedor"] = Relationship(back_populates="empresa")
-    planos_dre: list["PlanoContasDRE"] = Relationship(back_populates="empresa")
-
 
 class Cliente(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    empresa_id: int = Field(foreign_key="empresa.id")
+    empresa_id: int = Field(foreign_key="empresa.id", index=True)
     nome: str
     doc: Optional[str] = None
-
-    empresa: Optional[Empresa] = Relationship(back_populates="clientes")
 
 
 class Fornecedor(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    empresa_id: int = Field(foreign_key="empresa.id")
+    empresa_id: int = Field(foreign_key="empresa.id", index=True)
     nome: str
     doc: Optional[str] = None
-
-    empresa: Optional[Empresa] = Relationship(back_populates="fornecedores")
 
 
 class Produto(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    empresa_id: int = Field(foreign_key="empresa.id")
+    empresa_id: int = Field(foreign_key="empresa.id", index=True)
     nome: str
     sku: Optional[str] = None
     preco_venda: Optional[float] = Field(default=0.0)
     unidade: Optional[str] = Field(default="un")
 
-    empresa: Optional[Empresa] = Relationship()
-
 
 class Estoque(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    produto_id: int = Field(foreign_key="produto.id")
+    produto_id: int = Field(foreign_key="produto.id", index=True)
     quantidade: float = Field(default=0.0)
     custo_medio: float = Field(default=0.0)
 
@@ -58,8 +47,6 @@ class PlanoContasDRE(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     empresa_id: int = Field(foreign_key="empresa.id", index=True)
     nome: str  # Ex.: "RECEITA: Vendas de produtos", "DESPESAS FIXAS: Aluguel", etc.
-
-    empresa: Optional[Empresa] = Relationship(back_populates="planos_dre")
 
 
 # ---------------- Documentos --------------------
@@ -142,8 +129,7 @@ class Lancamento(SQLModel, table=True):
     historico: Optional[str] = None
     valor: float = 0.0
 
-    # tipo contábil macro (apenas para consultas do app)
-    # "RECEITA", "DESPESA", "CUSTO" (usado como fallback)
+    # "RECEITA", "DESPESA", "CUSTO" (fallback de documentos)
     tipo: str
 
     origem: Optional[str] = None     # "DOCUMENTO", etc.
@@ -151,6 +137,7 @@ class Lancamento(SQLModel, table=True):
 
     cliente_id: Optional[int] = Field(default=None, foreign_key="cliente.id")
     fornecedor_id: Optional[int] = Field(default=None, foreign_key="fornecedor.id")
+
 
 
 

@@ -1,148 +1,156 @@
 # models.py
+from __future__ import annotations
 from typing import Optional
-from datetime import date
-from sqlmodel import SQLModel, Field
+from datetime import date, datetime
+from sqlmodel import SQLModel, Field, Relationship
 
-# Evita erro "Table ... already defined" em reruns do Streamlit
-SQLModel.metadata.clear()
 
-# --- ENTIDADES BÁSICAS ---
-
+# ----------------- Tabelas base -----------------
 class Empresa(SQLModel, table=True):
-    __tablename__ = "empresa"
     id: Optional[int] = Field(default=None, primary_key=True)
     nome: str
     cnpj: Optional[str] = None
 
-class PlanoContasDRE(SQLModel, table=True):
-    __tablename__ = "planocontasdre"
-    id: Optional[int] = Field(default=None, primary_key=True)
-    code: str
-    nome: str
-    parent_id: Optional[int] = Field(default=None, foreign_key="planocontasdre.id")
-    nivel: int = 1
+    # relacionamentos (apenas para referência; não são obrigatórios no app)
+    clientes: list["Cliente"] = Relationship(back_populates="empresa")
+    fornecedores: list["Fornecedor"] = Relationship(back_populates="empresa")
+    planos_dre: list["PlanoContasDRE"] = Relationship(back_populates="empresa")
+
 
 class Cliente(SQLModel, table=True):
-    __tablename__ = "cliente"
     id: Optional[int] = Field(default=None, primary_key=True)
     empresa_id: int = Field(foreign_key="empresa.id")
     nome: str
     doc: Optional[str] = None
+
+    empresa: Optional[Empresa] = Relationship(back_populates="clientes")
+
 
 class Fornecedor(SQLModel, table=True):
-    __tablename__ = "fornecedor"
     id: Optional[int] = Field(default=None, primary_key=True)
     empresa_id: int = Field(foreign_key="empresa.id")
     nome: str
     doc: Optional[str] = None
 
-# --- PRODUTOS / ESTOQUE ---
+    empresa: Optional[Empresa] = Relationship(back_populates="fornecedores")
+
 
 class Produto(SQLModel, table=True):
-    __tablename__ = "produto"
     id: Optional[int] = Field(default=None, primary_key=True)
     empresa_id: int = Field(foreign_key="empresa.id")
-    sku: str
     nome: str
-    unidade: str
-    tipo: str  # 'produto', 'servico', 'mp'
-    conta_dre_receita_id: Optional[int] = Field(default=None, foreign_key="planocontasdre.id")
+    sku: Optional[str] = None
+    preco_venda: Optional[float] = Field(default=0.0)
+    unidade: Optional[str] = Field(default="un")
+
+    empresa: Optional[Empresa] = Relationship()
+
 
 class Estoque(SQLModel, table=True):
-    __tablename__ = "estoque"
     id: Optional[int] = Field(default=None, primary_key=True)
-    empresa_id: int = Field(foreign_key="empresa.id")
     produto_id: int = Field(foreign_key="produto.id")
-    qty_atual: float = 0
-    custo_medio_atual: float = 0
+    quantidade: float = Field(default=0.0)
+    custo_medio: float = Field(default=0.0)
 
-# --- DRE / Lançamentos por competência ---
 
-class Lancamento(SQLModel, table=True):
-    __tablename__ = "lancamento"
+# ------------- Plano de Contas DRE --------------
+class PlanoContasDRE(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    empresa_id: int = Field(foreign_key="empresa.id")
-    data_competencia: date
-    data_movimento: Optional[date] = None
-    historico: str
-    planocontas_id: Optional[int] = Field(default=None, foreign_key="planocontasdre.id")
-    cliente_id: Optional[int] = Field(default=None, foreign_key="cliente.id")
-    fornecedor_id: Optional[int] = Field(default=None, foreign_key="fornecedor.id")
-    valor: float
-    tipo: str  # 'RECEITA', 'DESPESA', 'CUSTO'
-    origem: Optional[str] = None
-    doc_ref: Optional[str] = None
+    empresa_id: int = Field(foreign_key="empresa.id", index=True)
+    nome: str  # Ex.: "RECEITA: Vendas de produtos", "DESPESAS FIXAS: Aluguel", etc.
 
-# --- CR / CP ---
+    empresa: Optional[Empresa] = Relationship(back_populates="planos_dre")
 
-class ContaReceber(SQLModel, table=True):
-    __tablename__ = "contasreceber"
-    id: Optional[int] = Field(default=None, primary_key=True)
-    empresa_id: int = Field(foreign_key="empresa.id")
-    cliente_id: Optional[int] = Field(default=None, foreign_key="cliente.id")
-    titulo: str
-    data_emissao: date
-    data_vencto: date
-    valor: float
-    saldo: float
-    status: str = "ABERTO"
 
-class ContaPagar(SQLModel, table=True):
-    __tablename__ = "contaspagar"
-    id: Optional[int] = Field(default=None, primary_key=True)
-    empresa_id: int = Field(foreign_key="empresa.id")
-    fornecedor_id: Optional[int] = Field(default=None, foreign_key="fornecedor.id")
-    titulo: str
-    data_emissao: date
-    data_vencto: date
-    valor: float
-    saldo: float
-    status: str = "ABERTO"
-
-# --- DOCUMENTOS (cabeçalho / parcelas / itens) ---
-
+# ---------------- Documentos --------------------
 class Documento(SQLModel, table=True):
-    __tablename__ = "documento"
     id: Optional[int] = Field(default=None, primary_key=True)
-    empresa_id: int = Field(foreign_key="empresa.id")
+    empresa_id: int = Field(foreign_key="empresa.id", index=True)
 
-    # VENDA | COMPRA | SERVICO
-    natureza: str
-
-    # NFe | NFSe | Recibo | Contrato | Outro
-    tipo_doc: str
+    natureza: str  # "VENDA" | "COMPRA" | "SERVICO"
+    tipo_doc: str  # "NFe" | "NFSe" | "Recibo" | "Contrato" | "Outro"
     numero: Optional[str] = None
     serie: Optional[str] = None
     chave: Optional[str] = None
 
-    # CLIENTE | FORNECEDOR
-    parceiro_tipo: str
-    parceiro_id: int  # foreign key lógica: cliente.id ou fornecedor.id (conforme parceiro_tipo)
+    parceiro_tipo: str  # "CLIENTE" | "FORNECEDOR"
+    parceiro_id: int    # id do Cliente/Fornecedor escolhido
 
     data_emissao: date
     data_competencia: date
-    valor_total: float
+    valor_total: float = 0.0
+
     observacoes: Optional[str] = None
 
-class Parcela(SQLModel, table=True):
-    __tablename__ = "parcela"
-    id: Optional[int] = Field(default=None, primary_key=True)
-    documento_id: int = Field(foreign_key="documento.id")
-    # CR (contas a receber) | CP (contas a pagar)
-    destino: str
-    data_vencto: date
-    valor: float
 
 class DocumentoItem(SQLModel, table=True):
-    __tablename__ = "documentoitem"
     id: Optional[int] = Field(default=None, primary_key=True)
-    documento_id: int = Field(foreign_key="documento.id")
+    documento_id: int = Field(foreign_key="documento.id", index=True)
     produto_id: Optional[int] = Field(default=None, foreign_key="produto.id")
+
     descricao: str
-    quantidade: float
-    unidade: str
-    preco_unit: float
-    valor_total: float
-    # opcional: classificar direto a receita/custo/despesa por item
-    conta_dre_id: Optional[int] = Field(default=None, foreign_key="planocontasdre.id")
+    quantidade: float = 0.0
+    unidade: str = "un"
+    preco_unit: float = 0.0
+    valor_total: float = 0.0
+
+    conta_dre_id: Optional[int] = Field(default=None, foreign_key="planocontasdre.id", index=True)
+
+
+class Parcela(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    documento_id: int = Field(foreign_key="documento.id", index=True)
+    destino: str  # "CR" | "CP"
+    data_vencto: date
+    valor: float = 0.0
+
+
+# ----------- Contas a Receber / Pagar -----------
+class ContaReceber(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    empresa_id: int = Field(foreign_key="empresa.id", index=True)
+    cliente_id: Optional[int] = Field(default=None, foreign_key="cliente.id", index=True)
+
+    titulo: str
+    data_emissao: date
+    data_vencto: date
+    valor: float = 0.0
+    saldo: float = 0.0
+    status: str = "ABERTO"  # "ABERTO" | "PARCIAL" | "QUITADO"
+
+
+class ContaPagar(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    empresa_id: int = Field(foreign_key="empresa.id", index=True)
+    fornecedor_id: Optional[int] = Field(default=None, foreign_key="fornecedor.id", index=True)
+
+    titulo: str
+    data_emissao: date
+    data_vencto: date
+    valor: float = 0.0
+    saldo: float = 0.0
+    status: str = "ABERTO"  # "ABERTO" | "PARCIAL" | "QUITADO"
+
+
+# ----------------- Lançamentos -------------------
+class Lancamento(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    empresa_id: int = Field(foreign_key="empresa.id", index=True)
+
+    data_competencia: date
+    data_movimento: date
+    historico: Optional[str] = None
+    valor: float = 0.0
+
+    # tipo contábil macro (apenas para consultas do app)
+    # "RECEITA", "DESPESA", "CUSTO" (usado como fallback)
+    tipo: str
+
+    origem: Optional[str] = None     # "DOCUMENTO", etc.
+    doc_ref: Optional[str] = None    # id do documento como string
+
+    cliente_id: Optional[int] = Field(default=None, foreign_key="cliente.id")
+    fornecedor_id: Optional[int] = Field(default=None, foreign_key="fornecedor.id")
+
+
 

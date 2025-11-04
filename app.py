@@ -66,32 +66,20 @@ DRE_PRESETS = [
     "PROVISÕES: IRPJ e CSLL",
 ]
 
-# app.py — SUBSTITUIR seed_plano_contas_if_needed por esta versão
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError, InternalError
 from sqlmodel import SQLModel
 
 def seed_plano_contas_if_needed(session: Session, empresa_id: int):
     """
-    Garante a existência de PlanoContasDRE e insere presets.
-    Compatível com Transaction Pooler: DDL roda em AUTOCOMMIT.
+    Garante existência da tabela planocontasdre e insere presets.
+    Compatível com Transaction Pooler: DDL em AUTOCOMMIT e criação de índice
+    apenas se realmente não existir nenhum índice para empresa_id.
     """
-    try:
-        # tenta listar contas
-        existentes = session.exec(
-            select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
-        ).all()
-    except (ProgrammingError, InternalError, Exception):
-        # 1) tenta criar via metadata (ainda pode falhar no pooler)
-        try:
-            SQLModel.metadata.create_all(session.get_bind())
-            session.commit()
-        except Exception:
-            pass
-
-        # 2) cria com AUTOCOMMIT (compatível com pooler)
+    def _ensure_table_and_index():
         from db import engine
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            # 1) Tabela
             conn.exec_driver_sql("""
                 CREATE TABLE IF NOT EXISTS planocontasdre (
                     id SERIAL PRIMARY KEY,
@@ -99,13 +87,52 @@ def seed_plano_contas_if_needed(session: Session, empresa_id: int):
                     nome TEXT NOT NULL
                 )
             """)
-            conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_planocontasdre_empresa_id ON planocontasdre (empresa_id)")
-        session.commit()
+            # 2) Índice: verifica catálogo; cria somente se não houver QUALQUER índice em empresa_id
+            idx_exists = conn.execute(text("""
+                SELECT 1
+                FROM pg_indexes
+                WHERE tablename = 'planocontasdre'
+                  AND indexname = 'ix_planocontasdre_empresa_id'
+                LIMIT 1
+            """)).scalar()
 
+            if not idx_exists:
+                any_idx_empresa = conn.execute(text("""
+                    SELECT 1
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    JOIN pg_index i    ON i.indexrelid = c.oid
+                    JOIN pg_class t    ON t.oid = i.indrelid
+                    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey)
+                    WHERE t.relname = 'planocontasdre'
+                      AND a.attname = 'empresa_id'
+                    LIMIT 1
+                """)).scalar()
+
+                if not any_idx_empresa:
+                    # cria nosso índice padrão
+                    conn.exec_driver_sql("CREATE INDEX ix_planocontasdre_empresa_id ON planocontasdre (empresa_id)")
+
+    # Primeiro tenta selecionar; se falhar, garante tabela/índice e tenta de novo
+    try:
+        existentes = session.exec(
+            select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
+        ).all()
+    except (ProgrammingError, InternalError, Exception):
+        # tenta via metadata (pode falhar no pooler, mas não custa tentar)
+        try:
+            SQLModel.metadata.create_all(session.get_bind())
+            session.commit()
+        except Exception:
+            pass
+        # cria com AUTOCOMMIT e checagem de índice
+        _ensure_table_and_index()
+        # tenta novamente o select
         existentes = session.exec(
             select(PlanoContasDRE).where(PlanoContasDRE.empresa_id == empresa_id)
         ).all()
 
+    # Insere presets que faltam
     nomes_exist = {c.nome for c in existentes}
     criou = False
     for nome in DRE_PRESETS:
@@ -114,6 +141,7 @@ def seed_plano_contas_if_needed(session: Session, empresa_id: int):
             criou = True
     if criou:
         session.commit()
+
 
 
 
@@ -895,6 +923,7 @@ elif menu == "DRE (Competência)":
             col1.metric("Receita Líquida", f"R$ {receita_liquida:,.2f}")
             col2.metric("Lucro Bruto", f"R$ {lucro_bruto:,.2f}")
             col3.metric("Resultado Líquido", f"R$ {resultado_liquido:,.2f}")
+
 
 
 
